@@ -4,8 +4,11 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Threading;
+using Microsoft.Win32;
 
 namespace Procesi
 {
@@ -14,6 +17,7 @@ namespace Procesi
     internal sealed class ProcessIcons : IDisposable
     {
         private const int Capacity = 320;
+        private static readonly char[] InvalidNameChars = Path.GetInvalidFileNameChars();
         private readonly object gate = new object();
         private readonly Dictionary<Key, LinkedListNode<Entry>> entries = new Dictionary<Key, LinkedListNode<Entry>>();
         private readonly LinkedList<Entry> recency = new LinkedList<Entry>();
@@ -43,17 +47,25 @@ namespace Procesi
 
         public Image Get(string path, int pixelSize)
         {
+            return Lookup(path,pixelSize,false);
+        }
+
+        public Image GetRule(string target, int pixelSize)
+        {
+            return Lookup(target,pixelSize,true);
+        }
+
+        private Image Lookup(string path, int pixelSize, bool savedRule)
+        {
             int size = Math.Max(12, Math.Min(64, pixelSize));
             lock (gate)
             {
                 if (disposed) throw new ObjectDisposedException("ProcessIcons");
-                Image fallback = FindOrRequest(new Key("", size)).Pixels ?? placeholder;
+                Image fallback = savedRule ? null : FindOrRequest(new Key("", size)).Pixels ?? placeholder;
                 if (String.IsNullOrEmpty(path)) return fallback;
                 if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) path = path.Substring(4);
-                // Reject UNC, device, root-relative and drive-relative paths before any lookup.
-                if (path.Length < 4 || path[1] != ':' || path[2] != '\\' ||
-                    !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) ||
-                    !path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return fallback;
+                if (!path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return fallback;
+                if (!IsDrivePath(path) && (!savedRule || path.IndexOfAny(InvalidNameChars) >= 0)) return fallback;
                 return FindOrRequest(new Key(path, size)).Pixels ?? fallback;
             }
         }
@@ -144,9 +156,11 @@ namespace Procesi
                 }
                 else
                 {
-                    if (!IsLocalFile(key.Path)) return null;
+                    string path = key.Path;
+                    if (IsDrivePath(path)) { if (!IsLocalFile(path)) return null; }
+                    else { path = RegisteredPath(path); if (path == null) return null; }
                     ShellFileInfo file;
-                    IntPtr status = SHGetFileInfoW(key.Path, 0, out file, (uint)Marshal.SizeOf(typeof(ShellFileInfo)), flags);
+                    IntPtr status = SHGetFileInfoW(path, 0, out file, (uint)Marshal.SizeOf(typeof(ShellFileInfo)), flags);
                     handle = file.Icon;
                     if (status == IntPtr.Zero || handle == IntPtr.Zero) return null;
                 }
@@ -160,6 +174,40 @@ namespace Procesi
             // GDI+ can report an invalid or undecodable icon as OutOfMemory.
             catch (OutOfMemoryException) { return null; }
             finally { if (handle != IntPtr.Zero) DestroyIcon(handle); }
+        }
+
+        private static bool IsDrivePath(string path)
+        {
+            return path.Length >= 4 && path[1] == ':' && path[2] == '\\' &&
+                ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'));
+        }
+
+        // App Paths can identify an installed executable even before a filename
+        // rule has matched a process. Resolve these registrations only on the worker.
+        private static string RegisteredPath(string name)
+        {
+            string key = @"Software\Microsoft\Windows\CurrentVersion\App Paths\" + name;
+            foreach (var hive in new[] {RegistryHive.CurrentUser, RegistryHive.LocalMachine})
+                foreach (var view in new[] {RegistryView.Registry64, RegistryView.Registry32})
+                {
+                    try
+                    {
+                        using (var root = RegistryKey.OpenBaseKey(hive,view))
+                        using (var app = root.OpenSubKey(key))
+                        {
+                            string path = app == null ? null : app.GetValue(null) as string;
+                            if (String.IsNullOrWhiteSpace(path)) continue;
+                            path = path.Trim().Trim('"');
+                            if (IsDrivePath(path) && path.EndsWith("\\" + name,StringComparison.OrdinalIgnoreCase) &&
+                                IsLocalFile(path))
+                                return path;
+                        }
+                    }
+                    catch (SecurityException) { }
+                    catch (UnauthorizedAccessException) { }
+                    catch (IOException) { }
+                }
+            return null;
         }
 
         private static bool IsLocalFile(string path)

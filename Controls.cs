@@ -20,7 +20,8 @@ namespace Procesi
         private static readonly string[] GpuValues = { "0", "1", "2", "3", "4", "5" };
         // The CPU and GPU scheduling APIs use the same order, with Idle as the lowest class.
         private static readonly string[] PriorityCodes = { "VL", "BN", "N", "AN", "H", "RT" };
-        private static readonly string[] PriorityNames = { "Idle", "Below normal", "Normal", "Above normal", "High", "Realtime" };
+        private static readonly string[] PriorityNames = { "Very low", "Below normal", "Normal", "Above normal", "High", "Realtime" };
+        private static readonly string[] PriorityLabels = PriorityNames.Select((name,i) => name + " (" + PriorityCodes[i] + ")").ToArray();
         private static readonly string[] IoValues = { "0", "1", "2" };
         private static readonly string[] IoLabels = { "Very low", "Low", "Normal" };
         private static readonly string[] MemoryValues = { "1", "2", "3", "4", "5" };
@@ -59,7 +60,9 @@ namespace Procesi
         public static int PriorityRank(string label)
         {
             int index = Array.IndexOf(PriorityCodes, label);
+            if (index < 0) index = Array.IndexOf(PriorityLabels, label);
             if (index < 0) index = Array.IndexOf(PriorityNames, label);
+            if (index < 0 && label == "Idle") return 1;
             return index + 1;
         }
 
@@ -67,10 +70,20 @@ namespace Procesi
         {
             int rank = PriorityRank(label);
             if (rank == 0) return label;
-            return rank == 1 ? "Very low (Windows Idle)" : PriorityNames[rank - 1];
+            return rank == 1 ? PriorityLabels[0] + " · Windows Idle" : PriorityLabels[rank - 1];
         }
 
         public static string Display(string key, string value)
+        {
+            return FormatValue(key,value,false);
+        }
+
+        public static string DisplayCompact(string key, string value)
+        {
+            return FormatValue(key,value,true);
+        }
+
+        private static string FormatValue(string key, string value,bool compact)
         {
             if (value == null) return "—";
             if (key == "cpusets")
@@ -83,7 +96,7 @@ namespace Procesi
             if (index < 0) return value;
             if (key == "memory") return MemoryLabels[index];
             if (key == "io") return IoLabels[index];
-            return PriorityCodes[index];
+            return compact ? PriorityCodes[index] : PriorityLabels[index];
         }
 
         public static string Normalize(string key, string value)

@@ -14,9 +14,9 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Process Panel")]
 [assembly: AssemblyProduct("Process Panel")]
 [assembly: AssemblyDescription("Monitor Windows processes and manage per-application rules.")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
-[assembly: AssemblyInformationalVersion("1.01")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyInformationalVersion("1.02")]
 
 namespace Procesi
 {

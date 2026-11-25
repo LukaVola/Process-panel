@@ -48,7 +48,7 @@ namespace Procesi
         private readonly MetricsFooter metrics = new MetricsFooter();
         private readonly List<ProcessRow> shown = new List<ProcessRow>();
         private readonly List<SavedRule> shownRules = new List<SavedRule>();
-        private readonly Dictionary<string,SavedRule> byPath = new Dictionary<string,SavedRule>(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string,SavedRule> byPath = new Dictionary<string,SavedRule>(StringComparer.OrdinalIgnoreCase);
         private ProcessSnapshot latest;
         private bool queuedRefresh, exiting, updating, isMaximized, samplerPaused;
         private enum Page { All, Active, Rules }
@@ -71,6 +71,8 @@ namespace Procesi
         {
             public string Path;
             public string Name;
+            public string IconTarget;
+            public bool SeenInSnapshot;
             public string Settings;
             public string Details;
             public string[] Keys;
@@ -402,7 +404,7 @@ namespace Procesi
             };
             grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(28, 28, 28);
             grid.CellValueNeeded += GiveValue;
-            grid.CellPainting += PaintProcessName;
+            grid.CellPainting += PaintApplicationName;
             grid.CellPainting += PaintActiveCpu;
             grid.CellToolTipTextNeeded += delegate(object sender, DataGridViewCellToolTipTextNeededEventArgs e)
             {
@@ -444,12 +446,13 @@ namespace Procesi
             };
         }
 
-        private void PaintProcessName(object sender, DataGridViewCellPaintingEventArgs e)
+        private void PaintApplicationName(object sender, DataGridViewCellPaintingEventArgs e)
         {
-            if (showingRules || e.RowIndex < 0 || e.RowIndex >= shown.Count || e.ColumnIndex < 0 ||
-                grid.Columns[e.ColumnIndex].Name != "name" || !Visible || WindowState == FormWindowState.Minimized || exiting) return;
+            if (e.RowIndex < 0 || e.ColumnIndex < 0 || !Visible || WindowState == FormWindowState.Minimized || exiting ||
+                grid.Columns[e.ColumnIndex].Name != (showingRules ? "app" : "name")) return;
+            if (e.RowIndex >= (showingRules ? shownRules.Count : shown.Count)) return;
 
-            ProcessRow process = shown[e.RowIndex];
+            string name = showingRules ? shownRules[e.RowIndex].Name : shown[e.RowIndex].Name;
             float scale = e.Graphics.DpiX / 96f;
             int inset = Math.Max(1,(int)Math.Round(2*scale));
             int gap = Math.Max(1,(int)Math.Round(4*scale));
@@ -461,7 +464,8 @@ namespace Procesi
 
             e.PaintBackground(e.ClipBounds,true);
             if (processIcons == null) processIcons = new ProcessIcons(QueueIconRepaint);
-            Image icon = processIcons.Get(process.Path,iconSize);
+            Image icon = showingRules ? processIcons.GetRule(shownRules[e.RowIndex].IconTarget,iconSize)
+                                      : processIcons.Get(shown[e.RowIndex].Path,iconSize);
             if (icon != null)
             {
                 var bounds = new Rectangle(left,e.CellBounds.Top+(e.CellBounds.Height-iconSize)/2,iconSize,iconSize);
@@ -472,7 +476,7 @@ namespace Procesi
             {
                 var textBounds = new Rectangle(textLeft,e.CellBounds.Top,right-textLeft,e.CellBounds.Height);
                 bool selected = (e.State & DataGridViewElementStates.Selected) != 0;
-                TextRenderer.DrawText(e.Graphics,process.Name,e.CellStyle.Font,textBounds,
+                TextRenderer.DrawText(e.Graphics,name,e.CellStyle.Font,textBounds,
                     selected ? e.CellStyle.SelectionForeColor : e.CellStyle.ForeColor,
                     TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding |
                     TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.PreserveGraphicsClipping);
@@ -489,8 +493,8 @@ namespace Procesi
                 BeginInvoke((Action)delegate
                 {
                     System.Threading.Interlocked.Exchange(ref iconRepaintQueued,0);
-                    if (exiting || IsDisposed || !Visible || showingRules || !grid.Visible) return;
-                    var column = grid.Columns["name"];
+                    if (exiting || IsDisposed || !Visible || !grid.Visible) return;
+                    var column = grid.Columns[showingRules ? "app" : "name"];
                     if (column == null) return;
                     Rectangle visible = grid.GetColumnDisplayRectangle(column.Index,true);
                     if (visible.Width > 0 && visible.Height > 0) grid.Invalidate(visible);
@@ -619,15 +623,40 @@ namespace Procesi
 
         private void ReadRules()
         {
-            byPath.Clear();
+            var previous = byPath;
+            byPath = new Dictionary<string,SavedRule>(StringComparer.OrdinalIgnoreCase);
             foreach (string path in rules.Paths())
             {
                 var values = rules.Values(path);
-                var parts = values.OrderBy(pair => pair.Key).Select(pair =>
-                    Procesi.Controls.Label(pair.Key) + " · " + Procesi.Controls.Display(pair.Key, pair.Value)).ToArray();
+                var summary = new List<string>();
+                var details = new List<string>();
+                foreach (var pair in values.OrderBy(item => item.Key))
+                {
+                    string label = Procesi.Controls.Label(pair.Key) + " · ";
+                    string full = label + Procesi.Controls.Display(pair.Key,pair.Value);
+                    details.Add(full);
+                    summary.Add(pair.Key == "cpu" || pair.Key == "gpupriority"
+                        ? label + Procesi.Controls.DisplayCompact(pair.Key,pair.Value) : full);
+                }
                 string name = Path.GetFileName(path);
+                SavedRule old;
                 byPath[path] = new SavedRule { Name = name, Path = path, Keys = values.Keys.ToArray(),
-                    Settings = String.Join("   /   ", parts), Details = String.Join(Environment.NewLine, parts) };
+                    IconTarget = previous.TryGetValue(path,out old) ? old.IconTarget : path,
+                    Settings = String.Join("   /   ", summary), Details = String.Join(Environment.NewLine, details) };
+            }
+
+            // A filename rule may have no path until its process runs. Keep the last
+            // observed file for this rule so its icon also works after the process exits.
+            if (latest == null || byPath.Count == 0) return;
+            foreach (var process in latest.Rows)
+            {
+                SavedRule rule;
+                if (String.IsNullOrEmpty(process.Path) || String.IsNullOrEmpty(process.Name) ||
+                    !byPath.TryGetValue(process.Name,out rule)) continue;
+                if (!rule.SeenInSnapshot) rule.IconTarget = process.Path;
+                else if (!String.Equals(rule.IconTarget,process.Path,StringComparison.OrdinalIgnoreCase))
+                    rule.IconTarget = null; // The name applies to more than one installed executable.
+                rule.SeenInSnapshot = true;
             }
         }
 

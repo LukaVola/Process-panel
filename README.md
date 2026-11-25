@@ -8,11 +8,11 @@ On 64-bit Windows 10 or 11 with .NET Framework 4.8 or later, open `ProcessPanel.
 
 ## Persistent rules
 
-Use a process's settings to save a rule for later launches. **Persistent Rules** lists saved rules. They also apply while Process Panel is running in the system tray. Sign-in startup is optional. Windows continues to manage the current power plan.
+Use a process's settings to save a rule for later launches. **Persistent Rules** lists saved rules and shows the application's icon when its executable can be identified. The rules also apply while Process Panel is running in the system tray. Sign-in startup is optional. Windows continues to manage the current power plan.
 
 CPU Affinity shows CCD labels when Windows identifies at least two distinct compute dies on a supported AMD processor. A partial selection within one CCD also shows its logical processors. On a single-CCD processor, or when die information is unavailable, the panel shows the CPU numbers and affinity mask.
 
-CPU and GPU priorities use six short labels.
+The **Settings** column in **Persistent Rules** uses short CPU and GPU priority labels. The process list, rule details and priority menus show the full name with its abbreviation, such as **Below normal (BN)**.
 
 | Label | Scheduling priority |
 | --- | --- |
