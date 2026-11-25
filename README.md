@@ -10,6 +10,19 @@ On 64-bit Windows 10 or 11 with .NET Framework 4.8 or later, open `ProcessPanel.
 
 Use a process's settings to save a rule for later launches. **Persistent Rules** lists saved rules. They also apply while Process Panel is running in the system tray. Sign-in startup is optional. Windows continues to manage the current power plan.
 
+CPU Affinity shows CCD labels when Windows identifies at least two distinct compute dies on a supported AMD processor. A partial selection within one CCD also shows its logical processors. On a single-CCD processor, or when die information is unavailable, the panel shows the CPU numbers and affinity mask.
+
+CPU and GPU priorities use six short labels.
+
+| Label | Scheduling priority |
+| --- | --- |
+| VL | Very low (Windows Idle) |
+| BN | Below normal |
+| N | Normal |
+| AN | Above normal |
+| H | High |
+| RT | Realtime |
+
 On a new profile the rules list starts empty. Process Panel stores scheduling rules in `%LOCALAPPDATA%\ProcesniPanel\rules.xml`. Windows stores per-application GPU selection in the current user's graphics preferences.
 
 ## Build

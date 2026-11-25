@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -14,6 +15,7 @@ namespace Procesi
         private readonly CheckBox remember = new CheckBox();
         private readonly Label note = new Label();
         private readonly Panel selector = new Panel();
+        private readonly ToolTip tips = new ToolTip();
         private readonly List<KeyValuePair<string,string>> entries = new List<KeyValuePair<string,string>>();
         public Func<bool> Commit;
         public bool Remember { get { return remember.Checked; } }
@@ -56,6 +58,7 @@ namespace Procesi
             AcceptButton=ok; CancelButton=cancel;
             Controls.Add(grid);
             DarkTheme.ApplyWindow(this);
+            Disposed += delegate { tips.Dispose(); };
         }
 
         public void SetChoices(IEnumerable<KeyValuePair<string,string>> choices, string current)
@@ -67,11 +70,40 @@ namespace Procesi
                 if (choice.Key == current) combo.SelectedIndex=i;
             }
         }
-        public void SetMultiple(IEnumerable<KeyValuePair<string,string>> choices, IEnumerable<string> selected, string help)
+        public void ShowPriorityDescriptions()
         {
-            var checkedIds=new HashSet<string>(selected);
-            foreach (var choice in choices) { entries.Add(choice); list.Items.Add(choice.Value,checkedIds.Contains(choice.Key)); }
-            SetNote(help);
+            EventHandler describe = delegate {
+                string text = Procesi.Controls.PriorityDescription(combo.SelectedItem as string) ?? "";
+                combo.AccessibleDescription = text;
+                tips.SetToolTip(combo,text);
+            };
+            combo.SelectedIndexChanged += describe;
+            describe(combo,EventArgs.Empty);
+        }
+
+        public void SetAffinityChoices(IEnumerable<KeyValuePair<string,string>> choices, ulong current)
+        {
+            foreach (var choice in choices)
+            {
+                ulong bit = ulong.Parse(choice.Key,NumberStyles.HexNumber,CultureInfo.InvariantCulture);
+                entries.Add(choice);
+                list.Items.Add(choice.Value,(current & bit) != 0);
+            }
+            var selection = new Label {Dock=DockStyle.Top, Height=Font.Height + 8, AutoEllipsis=true};
+            selector.Controls.Add(selection);
+            list.BringToFront();
+            Action showSelection = delegate {
+                string text = current == 0 ? "No CPUs selected" : "Selected affinity · " +
+                    AffinityDisplay.Format(current.ToString("X",CultureInfo.InvariantCulture));
+                selection.Text = text;
+                tips.SetToolTip(selection,text);
+            };
+            list.ItemCheck += delegate(object sender,ItemCheckEventArgs e) {
+                ulong bit = ulong.Parse(entries[e.Index].Key,NumberStyles.HexNumber,CultureInfo.InvariantCulture);
+                if (e.NewValue == CheckState.Checked) current |= bit; else current &= ~bit;
+                showSelection();
+            };
+            showSelection();
         }
         public void SetRuleOption(bool allowed,string saved)
         {

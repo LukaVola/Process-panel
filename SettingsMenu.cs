@@ -192,7 +192,6 @@ namespace Procesi
                 if (multi)
                 {
                     List<KeyValuePair<string,string>> choices = new List<KeyValuePair<string,string>>();
-                    List<string> selected = new List<string>();
                     ulong mask = UInt64.Parse(current, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
                     ulong available = Settings.AffinityLimit(row.Pid,row.Started);
                     for (int i=0; i<64; i++)
@@ -201,14 +200,14 @@ namespace Procesi
                         if ((available & bit) == 0) continue;
                         string value = bit.ToString("X",CultureInfo.InvariantCulture);
                         choices.Add(new KeyValuePair<string,string>(value,"CPU " + i));
-                        if ((mask & bit) != 0) selected.Add(value);
                     }
-                    editor.SetMultiple(choices,selected,"Select the logical processors this process can run on.");
+                    editor.SetAffinityChoices(choices,mask);
                 }
                 else
                 {
                     var choices = Settings.Choices(key);
                     editor.SetChoices(choices.Select(x => new KeyValuePair<string,string>(x,Settings.Display(key,x))),current);
+                    if (key == "cpu" || key == "gpupriority") editor.ShowPriorityDescriptions();
                     if (!choices.Contains(current)) editor.SetNote("Current setting: " + Settings.Display(key,current));
                 }
                 string target = rules.TargetForSetting(row.Path,row.Name,key);

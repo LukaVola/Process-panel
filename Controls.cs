@@ -18,7 +18,9 @@ namespace Procesi
         private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
         private static readonly string[] CpuValues = { "64", "16384", "32", "32768", "128", "256" };
         private static readonly string[] GpuValues = { "0", "1", "2", "3", "4", "5" };
-        private static readonly string[] CpuLabels = { "Idle", "Below normal", "Normal", "Above normal", "High", "Realtime" };
+        // The CPU and GPU scheduling APIs use the same order, with Idle as the lowest class.
+        private static readonly string[] PriorityCodes = { "VL", "BN", "N", "AN", "H", "RT" };
+        private static readonly string[] PriorityNames = { "Idle", "Below normal", "Normal", "Above normal", "High", "Realtime" };
         private static readonly string[] IoValues = { "0", "1", "2" };
         private static readonly string[] IoLabels = { "Very low", "Low", "Normal" };
         private static readonly string[] MemoryValues = { "1", "2", "3", "4", "5" };
@@ -54,20 +56,34 @@ namespace Procesi
 
         public static string[] Choices(string key) { return (string[])ValueTable(key).Clone(); }
 
+        public static int PriorityRank(string label)
+        {
+            int index = Array.IndexOf(PriorityCodes, label);
+            if (index < 0) index = Array.IndexOf(PriorityNames, label);
+            return index + 1;
+        }
+
+        public static string PriorityDescription(string label)
+        {
+            int rank = PriorityRank(label);
+            if (rank == 0) return label;
+            return rank == 1 ? "Very low (Windows Idle)" : PriorityNames[rank - 1];
+        }
+
         public static string Display(string key, string value)
         {
             if (value == null) return "—";
             if (key == "cpusets")
                 return CpuSetRule.IsLocation(value) ? CpuSetRule.Display(value) :
                     value == "default" || value.Length == 0 ? "Let Windows decide" : value.Replace(",", ", ");
-            if (key == "affinity") return "0x" + value;
+            if (key == "affinity") return AffinityDisplay.Format(value);
             int index = Array.IndexOf(ValueTable(key), value);
             if (key == "io" && value == "3") return "High (system)";
             if (key == "io" && value == "4") return "Critical (system)";
             if (index < 0) return value;
             if (key == "memory") return MemoryLabels[index];
             if (key == "io") return IoLabels[index];
-            return CpuLabels[index];
+            return PriorityCodes[index];
         }
 
         public static string Normalize(string key, string value)

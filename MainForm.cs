@@ -409,7 +409,12 @@ namespace Procesi
                 if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
                 if (showingRules && e.RowIndex < shownRules.Count)
                     e.ToolTipText = e.ColumnIndex == 2 ? shownRules[e.RowIndex].Details : shownRules[e.RowIndex].Path;
-                else if (!showingRules && e.RowIndex < shown.Count) e.ToolTipText = shown[e.RowIndex].Path;
+                else if (!showingRules && e.RowIndex < shown.Count)
+                {
+                    var process = shown[e.RowIndex];
+                    e.ToolTipText = grid.Columns[e.ColumnIndex].Name == "priority"
+                        ? Procesi.Controls.PriorityDescription(process.Priority) : process.Path;
+                }
             };
             grid.CurrentCellChanged += delegate { if (!updating) { UpdateAction(); UpdateNotice(); } };
             grid.CellMouseDown += delegate(object sender, DataGridViewCellMouseEventArgs e)
@@ -762,7 +767,7 @@ namespace Procesi
                             case "cpu": cmp = a.Cpu.CompareTo(b.Cpu); break;
                             case "gpu": cmp = a.Gpu.CompareTo(b.Gpu); break;
                             case "ram": cmp = a.MemoryBytes.CompareTo(b.MemoryBytes); break;
-                            case "priority": cmp = PriorityRank(a.Priority).CompareTo(PriorityRank(b.Priority)); break;
+                            case "priority": cmp = Procesi.Controls.PriorityRank(a.Priority).CompareTo(Procesi.Controls.PriorityRank(b.Priority)); break;
                             case "rules": cmp = RuleCount(a).CompareTo(RuleCount(b)); break;
                             default: cmp = StringComparer.CurrentCultureIgnoreCase.Compare(a.Name, b.Name); break;
                         }
@@ -799,18 +804,6 @@ namespace Procesi
             finally { updating = false; }
             UpdateAction();
             UpdateNotice();
-        }
-
-        private static int PriorityRank(string priority)
-        {
-            string p = (priority ?? "").ToLowerInvariant().Replace(" ", "");
-            if (p.Contains("real")) return 6;
-            if (p.Contains("high")) return 5;
-            if (p.Contains("above")) return 4;
-            if (p.Contains("below")) return 2;
-            if (p.Contains("normal")) return 3;
-            if (p.Contains("idle") || p.Contains("low")) return 1;
-            return 0;
         }
 
         private ProcessRow SelectedProcess()
