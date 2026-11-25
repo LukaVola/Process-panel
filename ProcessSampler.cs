@@ -75,18 +75,20 @@ namespace Procesi
 
         public static ProcessSnapshot Capture()
         {
-            lock (Gate) return CaptureLocked(null);
+            lock (Gate) return CaptureProcesses(null);
+        }
+
+        internal static ProcessSnapshot CaptureIf(Func<bool> active)
+        {
+            // Closing a dashboard can overtake a worker that has not begun sampling.
+            lock (Gate) return active() ? CaptureProcesses(null) : null;
         }
 
         public static ProcessSnapshot CaptureForRules(IList<string> paths)
         {
             HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string path in paths) names.Add(System.IO.Path.GetFileName(path));
-            lock (Gate)
-            {
-                Pause();
-                return names.Count == 0 ? new ProcessSnapshot() : CaptureLocked(names);
-            }
+            return names.Count == 0 ? new ProcessSnapshot() : CaptureProcesses(names);
         }
 
         public static void Pause()
@@ -101,13 +103,18 @@ namespace Procesi
             }
         }
 
-        private static ProcessSnapshot CaptureLocked(HashSet<string> names)
+        private static ProcessSnapshot CaptureProcesses(HashSet<string> names)
         {
             ProcessSnapshot result = new ProcessSnapshot();
-            uint logical = GetActiveProcessorCount(0xffff);
-            if (logical == 0 || logical == 0xffffffff) logical = (uint)Environment.ProcessorCount;
+            bool withMetrics = names == null;
+            uint logical = 0;
+            if (withMetrics)
+            {
+                logical = GetActiveProcessorCount(0xffff);
+                if (logical == 0 || logical == 0xffffffff) logical = (uint)Environment.ProcessorCount;
+            }
             long idle, kernel, user;
-            if (names == null && GetSystemTimes(out idle, out kernel, out user))
+            if (withMetrics && GetSystemTimes(out idle, out kernel, out user))
             {
                 long total = kernel + user;
                 if (logical <= 64 && lastTotal > 0 && total > lastTotal)
@@ -116,14 +123,15 @@ namespace Procesi
             }
             MemoryStatus memory = new MemoryStatus();
             memory.Size = (uint)Marshal.SizeOf(typeof(MemoryStatus));
-            if (names == null && GlobalMemoryStatusEx(ref memory) && memory.Total != 0)
+            if (withMetrics && GlobalMemoryStatusEx(ref memory) && memory.Total != 0)
             {
                 result.MemoryTotalGb = memory.Total / 1073741824.0;
                 result.MemoryUsedGb = (memory.Total - memory.Available) / 1073741824.0;
                 result.MemoryPercent = 100 * result.MemoryUsedGb / result.MemoryTotalGb;
             }
-            Dictionary<int,Sample> current = new Dictionary<int,Sample>();
-            char[] buffer = new char[32768];
+            // Counters and the previous UI sample are accessed only by callers holding Gate.
+            Dictionary<int,Sample> current = withMetrics ? new Dictionary<int,Sample>() : null;
+            char[] buffer = null;
             uint counterSize = (uint)Marshal.SizeOf(typeof(Counters));
             long totalThreads = 0;
             long snapshotStart = DateTime.UtcNow.ToFileTimeUtc();
@@ -145,7 +153,7 @@ namespace Procesi
                             long exit;
                             Sample old = default(Sample);
                             Sample now = default(Sample);
-                            if (GetProcessTimes(handle, out row.Started, out exit, out kernel, out user))
+                            if (GetProcessTimes(handle, out row.Started, out exit, out kernel, out user) && withMetrics)
                             {
                                 now = new Sample { Started=row.Started, Ticks=kernel+user, Timestamp=Stopwatch.GetTimestamp() };
                                 if (previous.TryGetValue(row.Pid, out old) && old.Started == now.Started && now.Timestamp > old.Timestamp)
@@ -156,6 +164,7 @@ namespace Procesi
                             }
                             if (String.IsNullOrEmpty(row.Path))
                             {
+                                if (buffer == null) buffer = new char[32768];
                                 int length = buffer.Length;
                                 if (QueryFullProcessImageNameW(handle, 0, buffer, ref length)) row.Path = new string(buffer,0,length);
                             }
@@ -170,9 +179,9 @@ namespace Procesi
                                 // snapshot-only name for a process that already existed at capture.
                                 row.Started = 0;
                             }
-                            if (row.Started > 0) { now.Path=row.Path; current[row.Pid]=now; }
-                            if (names == null)
+                            if (withMetrics)
                             {
+                                if (row.Started > 0) { now.Path=row.Path; current[row.Pid]=now; }
                                 uint priority = GetPriorityClass(handle);
                                 if (priority != 0) row.Priority = Controls.Display("cpu", priority.ToString(CultureInfo.InvariantCulture));
                                 Counters counters = new Counters(); counters.Size = counterSize;
@@ -184,7 +193,7 @@ namespace Procesi
                 } while (Process32NextW(list, ref entry));
                 if (Marshal.GetLastWin32Error() != 18) throw new InvalidOperationException("Windows could not finish reading the process list.");
             }
-            if (names == null)
+            if (withMetrics)
             {
                 previous = current;
                 if (totalThreads <= int.MaxValue) result.ThreadCount = (int)totalThreads;

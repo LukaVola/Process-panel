@@ -40,6 +40,7 @@ namespace Procesi
         private int reconciling;
         private string storageError = "";
         private string runtimeError = "";
+        internal event Action Changed;
 
         public RuleStore()
             : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ProcesniPanel"))
@@ -417,11 +418,23 @@ namespace Procesi
                 storageError = "";
                 runtimeError = "";
             }
+            var changed = Changed;
+            if (changed != null) changed();
         }
 
         public void Reconcile(IList<ProcessRow> snapshot)
         {
-            if (snapshot == null || Interlocked.CompareExchange(ref reconciling, 1, 0) != 0) return;
+            if (snapshot != null) ReconcileCore(snapshot);
+        }
+
+        internal bool ScanRunningProcesses()
+        {
+            return ReconcileCore(null);
+        }
+
+        private bool ReconcileCore(IList<ProcessRow> snapshot)
+        {
+            if (Interlocked.CompareExchange(ref reconciling, 1, 0) != 0) return true;
             try
             {
                 Dictionary<string, Dictionary<string, Desired>> captured;
@@ -438,6 +451,18 @@ namespace Procesi
                 int unverified = 0;
                 if (captured.Count != 0)
                 {
+                    // Capture selectors and temporary overrides before enumerating processes.
+                    // Edits made during the scan wake the worker for another pass.
+                    if (snapshot == null)
+                    {
+                        try { snapshot = ProcessSampler.CaptureForRules(captured.Keys.ToArray()).Rows; }
+                        catch (InvalidOperationException ex)
+                        {
+                            lock (stateGate)
+                                if (ReferenceEquals(captured,rules)) runtimeError = "Could not check process rules. " + ex.Message;
+                            return true;
+                        }
+                    }
                     DateTime now = DateTime.UtcNow;
                     foreach (var row in snapshot)
                     {
@@ -498,7 +523,7 @@ namespace Procesi
                 attempts = next;
                 lock (stateGate)
                 {
-                    if (previousOverrides.Count != 0)
+                    if (previousOverrides.Count != 0 && ReferenceEquals(captured, rules))
                     {
                         foreach (var saved in previousOverrides)
                         {
@@ -517,6 +542,7 @@ namespace Procesi
                                 (unverified == 1 ? " matching process" : " matching processes") + " — " + firstUnverified;
                     }
                 }
+                return captured.Count != 0;
             }
             finally { Interlocked.Exchange(ref reconciling, 0); }
         }

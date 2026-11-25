@@ -14,9 +14,9 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Process Panel")]
 [assembly: AssemblyProduct("Process Panel")]
 [assembly: AssemblyDescription("Monitor Windows processes and manage per-application rules.")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
-[assembly: AssemblyInformationalVersion("1.02")]
+[assembly: AssemblyVersion("1.0.3.0")]
+[assembly: AssemblyFileVersion("1.0.3.0")]
+[assembly: AssemblyInformationalVersion("1.03")]
 
 namespace Procesi
 {
@@ -48,38 +48,49 @@ namespace Procesi
     internal static class Program
     {
         internal static readonly int MyPid = Process.GetCurrentProcess().Id;
-        internal static bool TrayStart;
-
         [STAThread]
         private static void Main(string[] args)
+        {
+            string instanceName=@"Local\ProcesniPanel-" + WindowsIdentity.GetCurrent().User.Value;
+            Run(args,instanceName,delegate { return new RuleStore(); });
+        }
+
+        internal static void Run(string[] args,string instanceName,Func<RuleStore> createRules)
         {
             var english = CultureInfo.GetCultureInfo("en-US");
             CultureInfo.DefaultThreadCurrentUICulture = english;
             Thread.CurrentThread.CurrentUICulture = english;
-            TrayStart=Array.Exists(args,s => String.Equals(s,"--tray",StringComparison.OrdinalIgnoreCase));
+            if (Array.Exists(args,s => String.Equals(s,"--exit",StringComparison.OrdinalIgnoreCase)))
+            {
+                try { using (var existing = EventWaitHandle.OpenExisting(instanceName+"-exit")) existing.Set(); }
+                catch (WaitHandleCannotBeOpenedException) { /* No resident application. */ }
+                return;
+            }
+            bool trayOnly=Array.Exists(args,s => String.Equals(s,"--tray",StringComparison.OrdinalIgnoreCase));
             bool acquired;
-            string instanceName=@"Local\ProcesniPanel-" + WindowsIdentity.GetCurrent().User.Value;
             using (var activate=new EventWaitHandle(false, EventResetMode.AutoReset, instanceName+"-activate"))
+            using (var quit=new EventWaitHandle(false, EventResetMode.AutoReset, instanceName+"-exit"))
             using (var unique=new Mutex(true,instanceName,out acquired))
             {
                 if (!acquired)
                 {
-                    if (!TrayStart) activate.Set();
+                    if (!trayOnly) activate.Set();
                     return;
                 }
                 try
                 {
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
-                    using (var form=new MainForm())
+                    var rules=createRules();
+                    using (var engine=new BackgroundRuleEngine(rules))
+                    using (var context=new PanelContext(rules,trayOnly))
                     {
-                        IntPtr window=form.Handle;
-                        RegisteredWaitHandle wake=ThreadPool.RegisterWaitForSingleObject(activate,delegate {
-                            try { form.BeginInvoke((Action)form.RestoreFromTray); }
-                            catch (InvalidOperationException) { /* The window is already closing. */ }
-                        },null,Timeout.Infinite,false);
-                        try { Application.Run(form); }
-                        finally { wake.Unregister(null); }
+                        var wake=ThreadPool.RegisterWaitForSingleObject(activate,
+                            delegate { context.PostCommand(false); },null,Timeout.Infinite,false);
+                        var stop=ThreadPool.RegisterWaitForSingleObject(quit,
+                            delegate { context.PostCommand(true); },null,Timeout.Infinite,false);
+                        try { Application.Run(context); }
+                        finally { wake.Unregister(null); stop.Unregister(null); }
                     }
                 }
                 finally { unique.ReleaseMutex(); }
@@ -103,27 +114,6 @@ namespace Procesi
             string message = length == 0 ? "Windows error " + number + "." :
                 buffer.ToString().TrimEnd() + " (Windows error " + number + ")";
             return new Win32Exception(code, message);
-        }
-    }
-
-    public partial class MainForm
-    {
-        private bool startupHidden;
-        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window,int state);
-        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
-        protected override void SetVisibleCore(bool value)
-        {
-            if (value && Program.TrayStart && !startupHidden)
-            {
-                startupHidden=true;
-                if (!IsHandleCreated) CreateHandle();
-                base.SetVisibleCore(false);
-                clock.Interval=6000;
-                clock.Start();
-                BeginInvoke((Action)RefreshNow);
-                return;
-            }
-            base.SetVisibleCore(value);
         }
     }
 

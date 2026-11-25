@@ -21,11 +21,9 @@ namespace Procesi
         private static readonly Color Surface = Color.FromArgb(25, 25, 25);
         private static readonly Color Raised = Color.FromArgb(55, 55, 55);
         private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
-        private readonly RuleStore rules = new RuleStore();
+        private readonly RuleStore rules;
         private readonly BackgroundWorker sampler = new BackgroundWorker();
         private readonly Timer clock = new Timer();
-        private readonly NotifyIcon tray = new NotifyIcon();
-        private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
         private readonly ToolTip tips = new ToolTip();
         private readonly SummaryBand summary = new SummaryBand();
         private readonly PageButton processesTab = new PageButton("All Processes", 114);
@@ -50,9 +48,11 @@ namespace Procesi
         private readonly List<SavedRule> shownRules = new List<SavedRule>();
         private Dictionary<string,SavedRule> byPath = new Dictionary<string,SavedRule>(StringComparer.OrdinalIgnoreCase);
         private ProcessSnapshot latest;
-        private bool queuedRefresh, exiting, updating, isMaximized, samplerPaused;
-        private enum Page { All, Active, Rules }
-        private sealed class ViewState
+        private bool queuedRefresh, exiting, updating;
+        private volatile bool samplingEnabled;
+        internal FormWindowState RestoreState { get; private set; }
+        internal enum Page { All, Active, Rules }
+        internal sealed class ViewState
         {
             public string SortKey;
             public bool Ascending;
@@ -62,6 +62,38 @@ namespace Procesi
         private Page page;
         private readonly ViewState[] views = {new ViewState("name",true), new ViewState("cpu",false), new ViewState("app",true)};
         private ViewState CurrentView { get { return views[(int)page]; } }
+        internal sealed class DashboardState
+        {
+            public Page Page;
+            public ViewState[] Views;
+            public int Threshold;
+            public Rectangle Bounds;
+            public FormWindowState WindowState;
+        }
+
+        internal DashboardState CaptureDashboardState()
+        {
+            CurrentView.Query = search.Text;
+            return new DashboardState {
+                Page=page, Views=views, Threshold=activeThreshold.Value, WindowState=RestoreState,
+                Bounds=WindowState == FormWindowState.Normal ? Bounds : RestoreBounds
+            };
+        }
+
+        internal void RestoreDashboardState(DashboardState state)
+        {
+            if (state == null) return;
+            Array.Copy(state.Views, views, views.Length);
+            activeThreshold.Value = state.Threshold;
+            search.Text = CurrentView.Query;
+            ChangePage(state.Page);
+            if (Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(state.Bounds)))
+            {
+                StartPosition = FormStartPosition.Manual;
+                Bounds = state.Bounds;
+            }
+            WindowState = state.WindowState;
+        }
         private bool showingRules { get { return page == Page.Rules; } }
         private static readonly double[] CpuThresholds = {0.01, 0.05, 0.1, 0.2};
         private double MinimumCpu { get { return CpuThresholds[activeThreshold.Value]; } }
@@ -84,8 +116,11 @@ namespace Procesi
         [DllImport("user32.dll", CharSet=CharSet.Unicode)]
         private static extern IntPtr SendMessageW(IntPtr window, int messageId, IntPtr wParam, string text);
 
-        public MainForm()
+        public MainForm() : this(new RuleStore()) {}
+
+        internal MainForm(RuleStore rules)
         {
+            this.rules = rules;
             Text = "Process Panel";
             Font = new Font("Segoe UI", 9.5f);
             BackColor = Paper;
@@ -101,7 +136,8 @@ namespace Procesi
                 ClientSize = new Size(Math.Max(674,Math.Min(1366,availableWidth)),Math.Max(420,Math.Min(680,availableHeight)));
             }
             MinimumSize = new Size(690, 460);
-            Icon = MakeIcon();
+            var dashboardIcon = MakeIcon();
+            Icon = dashboardIcon;
             DarkTheme.ApplyWindow(this);
             KeyPreview = true;
 
@@ -260,80 +296,50 @@ namespace Procesi
             metrics.UpdateSnapshot(null);
             SetColumns();
             UpdateAction();
-            ConfigureTray();
             sampler.DoWork += delegate(object sender, DoWorkEventArgs e)
             {
-                if ((bool)e.Argument)
-                {
-                    var targets = rules.Paths();
-                    if (targets.Count != 0) rules.Reconcile(ProcessSampler.CaptureForRules(targets).Rows);
-                    else if (!samplerPaused) ProcessSampler.Pause();
-                    samplerPaused = targets.Count == 0;
-                    return;
-                }
-                samplerPaused = false;
-                var snapshot = ProcessSampler.Capture();
-                rules.Reconcile(snapshot.Rows);
-                e.Result = snapshot;
+                e.Result = ProcessSampler.CaptureIf(() => samplingEnabled);
             };
             sampler.RunWorkerCompleted += Sampled;
             clock.Interval = 2000;
             clock.Tick += delegate { if (!sampler.IsBusy) RefreshNow(); };
-            Shown += delegate { SystemStats.AttachUi(System.Threading.SynchronizationContext.Current); RefreshNow(); clock.Start(); };
+            VisibleChanged += delegate { UpdateSampling(); };
             Resize += delegate
             {
-                if (WindowState == FormWindowState.Minimized) { Hide(); clock.Interval = 6000; RefreshNow(); }
-                else if (Visible) { isMaximized = WindowState == FormWindowState.Maximized; }
+                if (WindowState == FormWindowState.Minimized) Hide();
+                else if (Visible) RestoreState = WindowState;
             };
             KeyDown += HandleKeys;
-            FormClosing += delegate(object sender, FormClosingEventArgs e)
+            Disposed += delegate
             {
                 exiting = true;
+                UpdateSampling();
+                clock.Dispose();
+                tips.Dispose();
+                dashboardIcon.Dispose();
+                ReleaseProcessIcons();
+            };
+        }
+
+        private void UpdateSampling()
+        {
+            bool visible = !exiting && !Disposing && Visible && WindowState != FormWindowState.Minimized;
+            if (samplingEnabled == visible) return;
+            samplingEnabled = visible;
+            if (visible)
+            {
+                RestoreState = WindowState;
+                SystemStats.AttachUi(System.Threading.SynchronizationContext.Current);
+                clock.Start();
+                RefreshNow();
+            }
+            else
+            {
                 clock.Stop();
-                tray.Visible = false;
-            };
-            FormClosed += delegate { clock.Dispose(); tray.Dispose(); trayMenu.Dispose(); tips.Dispose(); };
-            VisibleChanged += delegate { if (!Visible) ReleaseProcessIcons(); };
-            Disposed += delegate { ReleaseProcessIcons(); };
-        }
-
-        private void ConfigureTray()
-        {
-            trayMenu.Items.Add("Open Process Panel", null, delegate { RestoreFromTray(); });
-            var login = new ToolStripMenuItem("Start at sign-in");
-            login.Click += delegate
-            {
-                try { LoginStart.Enabled = !LoginStart.Enabled; login.Checked = LoginStart.Enabled; }
-                catch (Exception ex) { DarkTheme.Message(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
-            };
-            trayMenu.Opening += delegate
-            {
-                try { login.Checked = LoginStart.Enabled; login.Enabled = true; }
-                catch { login.Enabled = false; }
-            };
-            trayMenu.Items.Add(login);
-            trayMenu.Items.Add(new ToolStripSeparator());
-            trayMenu.Items.Add("Exit", null, delegate { Close(); });
-            DarkTheme.StyleMenu(trayMenu);
-            tray.Icon = Icon;
-            tray.ContextMenuStrip = trayMenu;
-            tray.Text = "Process Panel";
-            tray.MouseClick += delegate(object sender, MouseEventArgs args) { if (args.Button == MouseButtons.Left) RestoreFromTray(); };
-            tray.Visible = true;
-        }
-
-        internal void RestoreFromTray()
-        {
-            startupHidden = true;
-            clock.Interval = 2000;
-            clock.Start();
-            Show();
-            SystemStats.AttachUi(System.Threading.SynchronizationContext.Current);
-            if (WindowState == FormWindowState.Minimized) WindowState = isMaximized ? FormWindowState.Maximized : FormWindowState.Normal;
-            ShowWindow(Handle, WindowState == FormWindowState.Maximized ? 3 : 5);
-            Activate();
-            SetForegroundWindow(Handle);
-            RefreshNow();
+                queuedRefresh = false;
+                ProcessSampler.Pause();
+                ReleaseProcessIcons();
+            }
         }
 
         private static Icon MakeIcon()
@@ -711,17 +717,15 @@ namespace Procesi
 
         internal void RefreshNow()
         {
-            if (exiting || IsDisposed) return;
+            if (exiting || IsDisposed || !samplingEnabled) return;
             if (InvokeRequired) { BeginInvoke((Action)RefreshNow); return; }
             if (sampler.IsBusy) { queuedRefresh = true; return; }
-            bool hidden = !Visible || WindowState == FormWindowState.Minimized;
-            if (hidden && samplerPaused && rules.Paths().Count == 0) return;
-            sampler.RunWorkerAsync(hidden);
+            sampler.RunWorkerAsync();
         }
 
         private void Sampled(object sender, RunWorkerCompletedEventArgs e)
         {
-            if (exiting || IsDisposed) return;
+            if (exiting || IsDisposed || !samplingEnabled) return;
             if (e.Error != null)
             {
                 SetStatus("Could not refresh the process list. " + e.Error.Message);
@@ -735,10 +739,6 @@ namespace Procesi
                 if (Visible) RebuildRows();
                 metrics.UpdateSnapshot(latest);
                 UpdateNotice();
-            }
-            else if (!Visible && samplerPaused && rules.Paths().Count == 0)
-            {
-                clock.Stop();
             }
             if (queuedRefresh) { queuedRefresh = false; RefreshNow(); }
         }
